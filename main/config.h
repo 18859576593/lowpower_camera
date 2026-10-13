@@ -62,8 +62,8 @@ extern "C" {
 #define KEY_IMG_DCW         "img:bDcw"
 #define KEY_IMG_COLORBAR    "img:bColorbar"
 #define KEY_IMG_HDR         "img:hdr"
-#define KEY_IMG_BAEC        "img:bAec"
-#define KEY_IMG_AECVALUE    "img:aecVal"
+// interim key written by early feature/manual-exposure builds, kept for NVS migration only
+#define KEY_IMG_AECVALUE_LEGACY "img:aecVal"
 
 #define KEY_LIGHT_MODE      "light:mode"
 #define KEY_LIGHT_THRESHOLD "light:thr"

@@ -928,8 +928,11 @@ esp_err_t cfg_get_image_attr(imgAttr_t *image)
     get_u8(g_userHandle, KEY_IMG_FRAMESIZE, &image->frameSize, 14); // default FRAMESIZE_FHD
     get_u8(g_userHandle, KEY_IMG_QUALITY, &image->quality, 12); // default quality 12 (0-63, higher value means lower quality)
     get_u8(g_userHandle, KEY_IMG_HDR, &image->hdrEnable, 0); // default HDR disabled
-    get_u8(g_userHandle, KEY_IMG_BAEC, &image->bAec, 1); // default 1=auto exposure, never 0 (manual with aecValue 0 = black image)
-    get_u16(g_userHandle, KEY_IMG_AECVALUE, &image->aecValue, 0); // default manual exposure lines
+    get_u8(g_userHandle, KEY_IMG_AEC, &image->bAec, 1); // default 1=auto exposure, never 0 (manual with aecValue 0 = black image)
+    if (get_u16(g_userHandle, KEY_IMG_AEC_VALUE, &image->aecValue, 0) != ESP_OK) {
+        // migrate from the interim key used by early feature/manual-exposure builds
+        get_u16(g_userHandle, KEY_IMG_AECVALUE_LEGACY, &image->aecValue, 0);
+    }
     mutex_unlock();
     return ESP_OK;
 }
@@ -949,8 +952,8 @@ esp_err_t cfg_set_image_attr(imgAttr_t *image)
     set_u8(g_userHandle, KEY_IMG_FRAMESIZE, image->frameSize);
     set_u8(g_userHandle, KEY_IMG_QUALITY, image->quality);
     set_u8(g_userHandle, KEY_IMG_HDR, image->hdrEnable);
-    set_u8(g_userHandle, KEY_IMG_BAEC, image->bAec);
-    set_u16(g_userHandle, KEY_IMG_AECVALUE, image->aecValue);
+    set_u8(g_userHandle, KEY_IMG_AEC, image->bAec);
+    set_u16(g_userHandle, KEY_IMG_AEC_VALUE, image->aecValue);
     commit_cfg(g_userHandle);
     mutex_unlock();
     return ESP_OK;

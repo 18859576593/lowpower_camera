@@ -349,6 +349,7 @@ static esp_err_t csi_camera_init(void)
         return err;
     }
     sensor_t *s = esp_camera_sensor_get();
+    camera_cache_exposure_timing(s);   // fresh timing/cap before first manual exposure apply
 
     if (image.bAec) {
         s->set_exposure_ctrl(s, 1);              // auto exposure
@@ -365,7 +366,6 @@ static esp_err_t csi_camera_init(void)
     s->set_contrast(s, image.contrast);
     s->set_saturation(s, image.saturation);
     s->set_brightness(s, image.brightness);
-    camera_cache_exposure_timing(s);
 
     return ESP_OK;
 }
@@ -418,6 +418,15 @@ static esp_err_t csi_camera_set_image(imgAttr_t *image)
                 ESP_LOGI(TAG, "set_framesize : %d (real-time)", image->frameSize);
                 // give sensor some time to stabilize with new resolution
                 vTaskDelay(pdMS_TO_TICKS(100));
+                // frame size change alters HTS/VTS/PLL: refresh timing and re-apply
+                // manual exposure so the 300ms cap and ms display stay correct
+                camera_cache_exposure_timing(s);
+                if (!image->bAec) {
+                    uint16_t aec = image->aecValue > s_expoMaxLines ? s_expoMaxLines : image->aecValue;
+                    s->set_exposure_ctrl(s, 0);
+                    s->set_aec_value(s, aec);
+                    image->aecValue = aec;  // keep the value stored to NVS within the fresh cap
+                }
             } else {
                 ESP_LOGW(TAG, "set_framesize failed: %d", ret);
             }

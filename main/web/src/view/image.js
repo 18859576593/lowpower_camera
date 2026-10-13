@@ -107,6 +107,10 @@ function Image() {
         gain: 15,
         flipHorEnable: true,
         flipVerEnable: true,
+        bAecManual: false, // manual exposure mode (bAec 0=manual / 1=auto on device)
+        aecValue: 0, // manual exposure lines
+        lineTimeUs: 0, // per-line duration from device, 0 = unknown
+        maxAecValue: 1200, // slider max = min(1200, VTS, time cap) from device
         MJPEG_URL: "",
         mountedVideo() {
             // "http://192.168.1.1:8080/api/v1/liveview/getJpegStream";
@@ -146,6 +150,11 @@ function Image() {
                 this.applyQualityLimit();
 
                 this.hdrEnable = camRes.hdrEnable ? true : false;
+
+                this.bAecManual = camRes.bAec ? false : true;
+                this.lineTimeUs = camRes.lineTimeUs || 0;
+                this.maxAecValue = camRes.maxAecValue || 1200;
+                this.aecValue = Math.min(camRes.aecValue || 0, this.maxAecValue);
             } catch (e) {
                 console.error('getImageInfo failed', e);
             } finally {
@@ -217,6 +226,8 @@ function Image() {
                 gain: Number(this.gain),
                 bHorizonetal: Number(this.flipHorEnable),
                 bVertical: Number(this.flipVerEnable),
+                bAec: this.bAecManual ? 0 : 1,
+                aecValue: Number(this.aecValue),
                 frameSize: Number(this.frameSize),
                 quality: Number(this.quality),
                 hdrEnable: Number(this.hdrEnable),
@@ -230,7 +241,30 @@ function Image() {
             this.applyQualityLimit();
             if (!detail.isInit) {
                 this.setCamInfo();
+                // HTS/VTS and the exposure cap change with resolution
+                this.refreshExpoInfo();
             }
+        },
+        /** Re-fetch exposure timing/cap after a resolution change. */
+        async refreshExpoInfo() {
+            try {
+                const camRes = await getData(URL.getCamParam);
+                this.lineTimeUs = camRes.lineTimeUs || 0;
+                this.maxAecValue = camRes.maxAecValue || 1200;
+                if (this.aecValue > this.maxAecValue) {
+                    this.aecValue = this.maxAecValue;
+                }
+            } catch (e) {
+                console.error("refreshExpoInfo failed", e);
+            }
+        },
+        /** Slider value text: converted ms when line time is known, raw otherwise. */
+        exposureMsText() {
+            if (!this.lineTimeUs) {
+                return String(this.aecValue);
+            }
+            const ms = (this.aecValue * this.lineTimeUs) / 1000;
+            return ms >= 100 ? Math.round(ms) + " ms" : ms.toFixed(1) + " ms";
         },
         changeQuality() {
             // limit quality value to range 0-63
@@ -264,6 +298,7 @@ function Image() {
             // this.gainCeil = 3;
             this.flipHorEnable = false;
             this.flipVerEnable = false;
+            this.bAecManual = false; // exposure back to auto
             await this.setCamInfo();
             return;
         },

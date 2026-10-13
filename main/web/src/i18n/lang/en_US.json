@@ -17,6 +17,8 @@
     "gainCeil": "Gain Ceiling",
     "gain": "Gain",
     "flipHorizon": "Flip Horizontal",
+    "manualExposure": "Manual Exposure",
+    "exposureTime": "Exposure Time",
     "flipVertical": "Flip Vertical",
     "lightBrightness": "Light Brightness",
     "hdr": "HDR",

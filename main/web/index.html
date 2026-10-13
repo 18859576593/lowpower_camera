@@ -337,6 +337,49 @@
                                     </span>
                                 </span>
                             </div>
+
+                            <div class="card-item">
+                                <span class="card-item-label"
+                                    >{{ $t("img.manualExposure") }}</span
+                                >
+                                <span class="card-item-content">
+                                    <span class="switch">
+                                        <input
+                                            id="meExpSwitch"
+                                            type="checkbox"
+                                            v-model="bAecManual"
+                                            @change="setCamInfo()"
+                                        />
+                                        <label
+                                            for="meExpSwitch"
+                                            class="switch-content"
+                                        ></label>
+                                    </span>
+                                </span>
+                            </div>
+                            <div class="card-item" v-show="bAecManual">
+                                <span class="card-item-label"
+                                    >{{ $t("img.exposureTime") }}</span
+                                >
+                                <span class="card-item-content">
+                                    <span class="slider-box">
+                                        <span style="width: auto">{{
+                                            exposureMsText()
+                                        }}</span>
+                                        <input
+                                            class="slider-input"
+                                            type="range"
+                                            v-model.number="aecValue"
+                                            min="0"
+                                            :max="maxAecValue"
+                                            step="1"
+                                            @input="changeSlider($el)"
+                                            @change="setCamInfo()"
+                                            v-effect="aecValue; changeSlider($el)"
+                                        />
+                                    </span>
+                                </span>
+                            </div>
                         </div>
                         
                     </div>

@@ -6,7 +6,7 @@
 
 /** Number of boot sessions to keep on LittleFS (session_log_0 = current ... _{N-1} = oldest). */
 #ifndef SESSION_LOG_BOOT_SLOTS
-#define SESSION_LOG_BOOT_SLOTS 5
+#define SESSION_LOG_BOOT_SLOTS 60
 #endif
 
 #ifdef __cplusplus

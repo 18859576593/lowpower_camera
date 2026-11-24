@@ -98,6 +98,10 @@ static uint16_t s_expoMaxLines = 1200;
 #define CAL_EV_BAND         2     // total AE (expo x gain) ratio must stay within [1/2, 2]
 #define CAL_CHECK_MARGIN_MS 100   // extra wait after one frame period
 static bool s_seedLearnDone = false;  // learn once per camera_open session
+// soak-test timing stats (boot-relative, esp_timer)
+static uint32_t s_warmupStartMs = 0;  // camera_open entry
+static uint32_t s_warmupMs = 0;       // measured warmup duration
+static bool s_seedFastPath = false;   // last wake used the seed fast path
 
 static void sens_cmd_register(void);
 
@@ -652,6 +656,8 @@ esp_err_t camera_open(QueueHandle_t in, QueueHandle_t out)
     handle->bInit = true;
     sens_cmd_register();   // one-shot: add sensor ISP tuning command to console
     s_seedLearnDone = false;
+    s_warmupStartMs = (uint32_t)(esp_timer_get_time() / 1000);
+    s_seedFastPath = false;
     // wait for sensor stable with configurable delay
     capAttr_t capAttr;
     cfg_get_cap_attr(&capAttr);
@@ -674,6 +680,8 @@ esp_err_t camera_open(QueueHandle_t in, QueueHandle_t out)
         ESP_LOGI(TAG, "wait for sensor stable with configurable delay %d ms", (int)capAttr.camWarmupMs);
         vTaskDelay(pdMS_TO_TICKS(capAttr.camWarmupMs));
     }
+    s_seedFastPath = fastSettled;
+    s_warmupMs = (uint32_t)(esp_timer_get_time() / 1000) - s_warmupStartMs;
     sleep_set_event_bits(SLEEP_SNAPSHOT_STOP_BIT);          // if no subsequent snapshot tasks, will enter sleep;
     misc_get_battery_voltage();
     
@@ -957,6 +965,11 @@ esp_err_t camera_snapshot(snapType_e type, uint8_t count)
         sleep_set_last_capture_time(time(NULL));
     }
     ESP_LOGI(TAG, "camera_snapshot Stop");
+    // one-line soak-test summary: boot-relative totals for this wake cycle
+    ESP_LOGI(TAG, "SNAPSHOT STATS: wakeTotal=%ums warmup=%ums seedFast=%d snapOk=%d type=%d",
+             (unsigned)((uint32_t)(esp_timer_get_time() / 1000)),
+             (unsigned)s_warmupMs, s_seedFastPath ? 1 : 0,
+             h->bSnapShotSuccess ? 1 : 0, (int)type);
     return ESP_OK;
 }
 

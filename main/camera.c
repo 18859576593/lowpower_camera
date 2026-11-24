@@ -381,18 +381,9 @@ static bool camera_seed_boot_check(calSeed_t *seed)
     }
     imgAttr_t img;
     cfg_get_image_attr(&img);
-    // manual exposure or AWB-only seed (expoMs==0) => inject/validate AWB only
+    // manual exposure or AWB-only seed (expoMs==0) => validate AWB only.
+    // Register inject already happened in csi_camera_init (safe init window).
     bool aeAuto = (img.bAec != 0) && (seed->expoMs > 0) && (seed->gain > 0);
-    if (aeAuto) {
-        uint16_t lines = (uint16_t)(seed->expoMs * 1000 / s_expoLineTimeUs);
-        s->set_aec_value(s, lines);
-        s->set_agc_gain(s, seed->gain);
-    }
-    s->set_reg(s, 0x3400, 0xFFFF, seed->awbR);
-    s->set_reg(s, 0x3402, 0xFFFF, seed->awbG);
-    s->set_reg(s, 0x3404, 0xFFFF, seed->awbB);
-    ESP_LOGI(TAG, "cal seed: inject (ae=%d expoMs=%u gain=%u R=%u G=%u B=%u)",
-             aeAuto ? 1 : 0, (unsigned)seed->expoMs, seed->gain, seed->awbR, seed->awbG, seed->awbB);
     // wait one frame period so the auto loops respond and registers latch
     int vts = s->get_reg(s, 0x380E, 0xFFFF);
     uint32_t frameMs = (vts > 0) ? ((uint32_t)vts * s_expoLineTimeUs / 1000) : 1350;
@@ -491,6 +482,24 @@ static esp_err_t csi_camera_init(void)
     s->set_contrast(s, image.contrast);
     s->set_saturation(s, image.saturation);
     s->set_brightness(s, image.brightness);
+
+    // AE/AWB boot-seed inject. Done here, inside the proven-safe init window:
+    // SCCB writes after the stream has stabilized can trigger cam VSYNC overflow.
+    calSeed_t seed;
+    cfg_get_cal_seed(&seed);
+    if (seed.valid && s_expoLineTimeUs > 0) {
+        bool aeAuto = (image.bAec != 0) && (seed.expoMs > 0) && (seed.gain > 0);
+        if (aeAuto) {
+            uint16_t lines = (uint16_t)(seed.expoMs * 1000 / s_expoLineTimeUs);
+            s->set_aec_value(s, lines);
+            s->set_agc_gain(s, seed.gain);
+        }
+        s->set_reg(s, 0x3400, 0xFFFF, seed.awbR);
+        s->set_reg(s, 0x3402, 0xFFFF, seed.awbG);
+        s->set_reg(s, 0x3404, 0xFFFF, seed.awbB);
+        ESP_LOGI(TAG, "cal seed: inject (ae=%d expoMs=%u gain=%u R=%u G=%u B=%u)",
+                 aeAuto ? 1 : 0, (unsigned)seed.expoMs, seed.gain, seed.awbR, seed.awbG, seed.awbB);
+    }
 
     return ESP_OK;
 }

@@ -16,6 +16,7 @@
 #include <sys/param.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <inttypes.h>
 #include <esp_timer.h>
 #include "img_converters.h"
@@ -29,6 +30,7 @@
 #include "misc.h"
 #include "utils.h"
 #include "uvc.h"
+#include "debug.h"
 
 #define TAG "-->CAMERA"  // Logging tag for camera module
 
@@ -90,6 +92,8 @@ static uint16_t s_expoMaxLines = 1200;
 #define CAMERA_MANUAL_EXPOSURE_MAX_MS 300
 // Used before timing is known: ~300ms assuming FHD line time (~0.91ms/line)
 #define CAMERA_MANUAL_EXPOSURE_FALLBACK_MAX_LINES 330
+
+static void sens_cmd_register(void);
 
 /**
  * Lock camera mutex for thread-safe operations
@@ -516,6 +520,7 @@ esp_err_t camera_open(QueueHandle_t in, QueueHandle_t out)
     handle->out = out;
     handle->eventGroup = xEventGroupCreate();
     handle->bInit = true;
+    sens_cmd_register();   // one-shot: add sensor ISP tuning command to console
     // wait for sensor stable with configurable delay
     capAttr_t capAttr;
     cfg_get_cap_attr(&capAttr);
@@ -556,6 +561,93 @@ esp_err_t camera_exposure_info(uint32_t *lineTimeUs, uint16_t *maxAecValue)
     *lineTimeUs = s_expoLineTimeUs;     // 0 = unknown (camera not opened yet / USB backend)
     *maxAecValue = s_expoMaxLines;
     return ESP_OK;
+}
+
+// ---- serial console: sensor ISP register access (tuning probe) ----
+// Walks the SCCB bus via the sensor driver's generic get_reg/set_reg, so any
+// ISP block (AWB/gamma/SDE/CMX/LENC...) can be probed live while the web MJPEG
+// preview is running. Writes are volatile: lost on camera re-init / deep sleep.
+static int sens_cmd(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("usage: sens <read reg | write reg val | dump start end | status>\n");
+        return ESP_FAIL;
+    }
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s || !s->get_reg || !s->set_reg) {
+        printf("camera not initialized, press capture button first\n");
+        return ESP_FAIL;
+    }
+    if (strcmp(argv[1], "read") == 0 && argc == 3) {
+        int reg = (int)strtoul(argv[2], NULL, 0);
+        int v = s->get_reg(s, reg, 0xFF);
+        if (v < 0) {
+            printf("read 0x%04x failed: %d\n", reg, v);
+            return ESP_FAIL;
+        }
+        printf("0x%04x: 0x%02x (%d)\n", reg, v, v);
+    } else if (strcmp(argv[1], "write") == 0 && argc == 4) {
+        int reg = (int)strtoul(argv[2], NULL, 0);
+        int val = (int)strtoul(argv[3], NULL, 0);
+        int v = s->set_reg(s, reg, 0xFF, val);
+        if (v < 0) {
+            printf("write 0x%04x failed: %d\n", reg, v);
+            return ESP_FAIL;
+        }
+        printf("0x%04x <= 0x%02x\n", reg, val);
+    } else if (strcmp(argv[1], "dump") == 0 && argc == 4) {
+        int start = (int)strtoul(argv[2], NULL, 0);
+        int end = (int)strtoul(argv[3], NULL, 0);
+        if (end < start || (end - start) > 0x400) {
+            printf("bad range (max 0x400 regs per call)\n");
+            return ESP_FAIL;
+        }
+        for (int reg = start; reg <= end; reg++) {
+            int v = s->get_reg(s, reg, 0xFF);
+            if (v < 0) {
+                printf("0x%04x: FAIL(%d)\n", reg, v);
+            } else {
+                printf("0x%04x: 0x%02X\n", reg, v);
+            }
+        }
+    } else if (strcmp(argv[1], "status") == 0) {
+        printf("backend: %s  framesize: %d\n", camera_get_backend_name(), s->status.framesize);
+        printf("AEC/AGC manual (0x3503): 0x%02x  [bit0 AEC-manual, bit1 AGC-manual, 1=manual]\n",
+               s->get_reg(s, 0x3503, 0xFF));
+        int expo = s->get_reg(s, 0x3500, 0xFFFFFF);
+        printf("exposure field (0x3500-02): %d  (%d lines)\n", expo, expo / 16);
+        int gain = s->get_reg(s, 0x350A, 0x3FF);
+        printf("gain field (0x350A/B): %d  (%d/16 x)\n", gain, gain / 16);
+        printf("HTS (0x380c/d): %d  VTS (0x380e/f): %d\n",
+               s->get_reg(s, 0x380C, 0xFFFF), s->get_reg(s, 0x380E, 0xFFFF));
+        printf("PLL 0x3035/36/37: 0x%02x 0x%02x 0x%02x  0x3108: 0x%02x  0x3824: 0x%02x\n",
+               s->get_reg(s, 0x3035, 0xFF), s->get_reg(s, 0x3036, 0xFF), s->get_reg(s, 0x3037, 0xFF),
+               s->get_reg(s, 0x3108, 0xFF), s->get_reg(s, 0x3824, 0xFF));
+        printf("quality (0x4407): %d  ISP 0x5000: 0x%02x  0x5001: 0x%02x\n",
+               s->get_reg(s, 0x4407, 0xFF) & 0x3F, s->get_reg(s, 0x5000, 0xFF), s->get_reg(s, 0x5001, 0xFF));
+        uint32_t lineUs = 0;
+        uint16_t maxAec = 0;
+        camera_exposure_info(&lineUs, &maxAec);
+        printf("cached: lineTime %u us  maxAecValue %u  xclk %u Hz\n",
+               (unsigned)lineUs, maxAec, (unsigned)s->xclk_freq_hz);
+    } else {
+        printf("usage: sens <read reg | write reg val | dump start end | status>\n");
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+static esp_console_cmd_t g_sensCmd[] = {
+    ESP_CONSOLE_CMD_INIT("sens", "sens [read reg | write reg val | dump start end | status]", NULL, sens_cmd, NULL),
+};
+
+static void sens_cmd_register(void)
+{
+    static bool registered = false;
+    if (!registered) {
+        debug_cmd_add(g_sensCmd, sizeof(g_sensCmd) / sizeof(g_sensCmd[0]));
+        registered = true;
+    }
 }
 
 /* removed legacy no-handle close */

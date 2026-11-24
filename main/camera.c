@@ -93,6 +93,12 @@ static uint16_t s_expoMaxLines = 1200;
 // Used before timing is known: ~300ms assuming FHD line time (~0.91ms/line)
 #define CAMERA_MANUAL_EXPOSURE_FALLBACK_MAX_LINES 330
 
+// AE/AWB boot-seed calibration thresholds
+#define CAL_AWB_DELTA_PCT   15    // per-channel AWB mismatch threshold (%)
+#define CAL_EV_BAND         2     // total AE (expo x gain) ratio must stay within [1/2, 2]
+#define CAL_CHECK_MARGIN_MS 100   // extra wait after one frame period
+static bool s_seedLearnDone = false;  // learn once per camera_open session
+
 static void sens_cmd_register(void);
 
 /**
@@ -330,6 +336,121 @@ static void camera_cache_exposure_timing(sensor_t *s)
     s_expoMaxLines = CAMERA_MANUAL_EXPOSURE_FALLBACK_MAX_LINES;
 }
 
+// ---- AE/AWB boot-seed calibration ----
+static bool camera_seed_chan_ok(uint16_t live, uint16_t seed)
+{
+    if (seed == 0) {
+        return false;
+    }
+    uint32_t diff = live > seed ? (live - seed) : (seed - live);
+    return diff * 100 <= (uint32_t)seed * CAL_AWB_DELTA_PCT;
+}
+
+// Read live AE/AWB state from sensor registers (gain packing mirrors the driver's get_agc_gain).
+static bool camera_seed_read_live(sensor_t *s, uint32_t *expoMs, uint16_t *gain,
+                                  uint16_t *r, uint16_t *g, uint16_t *b)
+{
+    if (!s || !s->get_reg || s_expoLineTimeUs == 0) {
+        return false;
+    }
+    int field = s->get_reg(s, 0x3500, 0xFFFFFF);        // 20-bit exposure field
+    int ra = s->get_reg(s, 0x350A, 0xFF);
+    int rb = s->get_reg(s, 0x350B, 0xFF);
+    int rr = s->get_reg(s, 0x3400, 0xFFFF);
+    int gg = s->get_reg(s, 0x3402, 0xFFFF);
+    int bb = s->get_reg(s, 0x3404, 0xFFFF);
+    if (field < 0 || ra < 0 || rb < 0 || rr < 0 || gg < 0 || bb < 0) {
+        return false;
+    }
+    *expoMs = (uint32_t)((uint64_t)(field / 16) * s_expoLineTimeUs / 1000);
+    *gain = (uint16_t)((((rb & 0xF0) >> 4) | ((ra & 0x03) << 4)) + ((rb & 0x0F) ? 1 : 0));
+    *r = (uint16_t)rr;
+    *g = (uint16_t)gg;
+    *b = (uint16_t)bb;
+    return true;
+}
+
+// Inject seed and validate after one frame period: true = environment matches,
+// the frame wait already served as warmup; false = fall back to full camWarmupMs.
+static bool camera_seed_boot_check(calSeed_t *seed)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s || !s->get_reg || !s->set_reg || s_expoLineTimeUs == 0) {
+        ESP_LOGI(TAG, "cal seed: skip boot check (camera not ready)");
+        return false;
+    }
+    imgAttr_t img;
+    cfg_get_image_attr(&img);
+    // manual exposure or AWB-only seed (expoMs==0) => inject/validate AWB only
+    bool aeAuto = (img.bAec != 0) && (seed->expoMs > 0) && (seed->gain > 0);
+    if (aeAuto) {
+        uint16_t lines = (uint16_t)(seed->expoMs * 1000 / s_expoLineTimeUs);
+        s->set_aec_value(s, lines);
+        s->set_agc_gain(s, seed->gain);
+    }
+    s->set_reg(s, 0x3400, 0xFFFF, seed->awbR);
+    s->set_reg(s, 0x3402, 0xFFFF, seed->awbG);
+    s->set_reg(s, 0x3404, 0xFFFF, seed->awbB);
+    ESP_LOGI(TAG, "cal seed: inject (ae=%d expoMs=%u gain=%u R=%u G=%u B=%u)",
+             aeAuto ? 1 : 0, (unsigned)seed->expoMs, seed->gain, seed->awbR, seed->awbG, seed->awbB);
+    // wait one frame period so the auto loops respond and registers latch
+    int vts = s->get_reg(s, 0x380E, 0xFFFF);
+    uint32_t frameMs = (vts > 0) ? ((uint32_t)vts * s_expoLineTimeUs / 1000) : 1350;
+    vTaskDelay(pdMS_TO_TICKS(frameMs + CAL_CHECK_MARGIN_MS));
+    uint32_t expoAct = 0;
+    uint16_t gainAct = 0, rAct = 0, gAct = 0, bAct = 0;
+    if (!camera_seed_read_live(s, &expoAct, &gainAct, &rAct, &gAct, &bAct)) {
+        return false;
+    }
+    bool aeOk = true;
+    if (aeAuto) {
+        if (expoAct == 0) {
+            aeOk = false;
+        } else {
+            uint32_t ta = expoAct * gainAct;
+            uint32_t ts = seed->expoMs * seed->gain;
+            aeOk = (ta >= ts / CAL_EV_BAND) && (ta <= ts * CAL_EV_BAND);
+        }
+    }
+    bool awbOk = camera_seed_chan_ok(rAct, seed->awbR)
+              && camera_seed_chan_ok(gAct, seed->awbG)
+              && camera_seed_chan_ok(bAct, seed->awbB);
+    ESP_LOGI(TAG, "cal seed: check %s (aeOk=%d awbOk=%d live expo=%ums gain=%u R=%u G=%u B=%u)",
+             (aeOk && awbOk) ? "pass" : "MISMATCH", aeOk, awbOk,
+             (unsigned)expoAct, gainAct, rAct, gAct, bAct);
+    return aeOk && awbOk;
+}
+
+// Learn current converged AE/AWB state into NVS (called after first good frame).
+static void camera_seed_learn(void)
+{
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s || !s->get_reg || s_expoLineTimeUs == 0) {
+        return;
+    }
+    imgAttr_t img;
+    cfg_get_image_attr(&img);
+    uint32_t expoMs = 0;
+    uint16_t gain = 16, r = 0, g = 0, b = 0;
+    if (!camera_seed_read_live(s, &expoMs, &gain, &r, &g, &b)) {
+        return;
+    }
+    calSeed_t seed = {0};
+    seed.valid = 1;
+    if (img.bAec != 0) {           // user manual exposure: AWB-only seed
+        seed.expoMs = expoMs;
+        seed.gain = gain;
+    } else {
+        seed.gain = 16;            // neutral 1x marker so the seed is never "gain==0"
+    }
+    seed.awbR = r;
+    seed.awbG = g;
+    seed.awbB = b;
+    cfg_set_cal_seed(&seed);
+    ESP_LOGI(TAG, "cal seed: learned (ae=%d expoMs=%u gain=%u R=%u G=%u B=%u)",
+             img.bAec != 0 ? 1 : 0, (unsigned)seed.expoMs, seed.gain, r, g, b);
+}
+
 static esp_err_t csi_camera_init(void)
 {
     esp_err_t err;
@@ -521,6 +642,7 @@ esp_err_t camera_open(QueueHandle_t in, QueueHandle_t out)
     handle->eventGroup = xEventGroupCreate();
     handle->bInit = true;
     sens_cmd_register();   // one-shot: add sensor ISP tuning command to console
+    s_seedLearnDone = false;
     // wait for sensor stable with configurable delay
     capAttr_t capAttr;
     cfg_get_cap_attr(&capAttr);
@@ -530,8 +652,19 @@ esp_err_t camera_open(QueueHandle_t in, QueueHandle_t out)
         cfg_get_light_attr(&light);
         camera_flash_led_ctrl(&light);
     }
-    ESP_LOGI(TAG, "wait for sensor stable with configurable delay %d ms", (int)capAttr.camWarmupMs);
-    vTaskDelay(pdMS_TO_TICKS(capAttr.camWarmupMs));
+    // AE/AWB boot-seed: inject + one-frame validation may replace the full warmup
+    bool fastSettled = false;
+    calSeed_t calSeed;
+    cfg_get_cal_seed(&calSeed);
+    if (calSeed.valid) {
+        fastSettled = camera_seed_boot_check(&calSeed);   // frame wait inside serves as fast warmup
+    } else {
+        ESP_LOGI(TAG, "cal seed: none, full warmup %d ms", (int)capAttr.camWarmupMs);
+    }
+    if (!fastSettled) {
+        ESP_LOGI(TAG, "wait for sensor stable with configurable delay %d ms", (int)capAttr.camWarmupMs);
+        vTaskDelay(pdMS_TO_TICKS(capAttr.camWarmupMs));
+    }
     sleep_set_event_bits(SLEEP_SNAPSHOT_STOP_BIT);          // if no subsequent snapshot tasks, will enter sleep;
     misc_get_battery_voltage();
     
@@ -630,6 +763,11 @@ static int sens_cmd(int argc, char **argv)
         camera_exposure_info(&lineUs, &maxAec);
         printf("cached: lineTime %u us  maxAecValue %u  xclk %u Hz\n",
                (unsigned)lineUs, maxAec, (unsigned)s->xclk_freq_hz);
+        calSeed_t seedInfo;
+        cfg_get_cal_seed(&seedInfo);
+        printf("cal seed: %s expoMs=%u gain=%u R=%u G=%u B=%u\n",
+               seedInfo.valid ? "valid" : "none",
+               (unsigned)seedInfo.expoMs, seedInfo.gain, seedInfo.awbR, seedInfo.awbG, seedInfo.awbB);
     } else {
         printf("usage: sens <read reg | write reg val | dump start end | status>\n");
         return ESP_FAIL;
@@ -787,6 +925,10 @@ esp_err_t camera_snapshot(snapType_e type, uint8_t count)
                 }
             }
             camera_fb_return(frame);
+            if (!s_seedLearnDone) {
+                s_seedLearnDone = true;
+                camera_seed_learn();   // persist converged AE/AWB for next boot
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(50));
         if (count == 0) {

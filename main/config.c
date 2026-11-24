@@ -1039,6 +1039,46 @@ esp_err_t cfg_set_cap_attr(capAttr_t *capture)
     return ESP_OK;
 }
 
+esp_err_t cfg_get_cal_seed(calSeed_t *seed)
+{
+    if (!seed) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    mutex_lock();
+    memset(seed, 0, sizeof(calSeed_t));
+    get_u8(g_userHandle, KEY_CAL_VALID, &seed->valid, 0);
+    get_u32(g_userHandle, KEY_CAL_EXPO_MS, &seed->expoMs, 0);
+    get_u16(g_userHandle, KEY_CAL_GAIN, &seed->gain, 16);
+    get_u16(g_userHandle, KEY_CAL_AWB_R, &seed->awbR, 0);
+    get_u16(g_userHandle, KEY_CAL_AWB_G, &seed->awbG, 0);
+    get_u16(g_userHandle, KEY_CAL_AWB_B, &seed->awbB, 0);
+    mutex_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cfg_set_cal_seed(calSeed_t *seed)
+{
+    if (!seed) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    mutex_lock();
+    set_u8(g_userHandle, KEY_CAL_VALID, seed->valid);
+    set_u32(g_userHandle, KEY_CAL_EXPO_MS, seed->expoMs);
+    set_u16(g_userHandle, KEY_CAL_GAIN, seed->gain);
+    set_u16(g_userHandle, KEY_CAL_AWB_R, seed->awbR);
+    set_u16(g_userHandle, KEY_CAL_AWB_G, seed->awbG);
+    set_u16(g_userHandle, KEY_CAL_AWB_B, seed->awbB);
+    commit_cfg(g_userHandle);
+    mutex_unlock();
+    return ESP_OK;
+}
+
+esp_err_t cfg_clear_cal_seed(void)
+{
+    calSeed_t seed = {0};
+    return cfg_set_cal_seed(&seed);
+}
+
 esp_err_t cfg_get_upload_attr(uploadAttr_t *upload)
 {
     mutex_lock();

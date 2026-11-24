@@ -79,6 +79,14 @@ extern "C" {
 #define KEY_CAP_INTERVAL_U  "cap:iUnit"
 #define KEY_CAP_INTERVAL_ANCHOR "cap:iAnchor" // Interval capture anchor time "HH:MM"
 #define KEY_CAP_CAM_WARMUP_MS "cap:camWarmupMs"
+
+/* AE/AWB boot-seed calibration (learned after convergence, injected on next boot) */
+#define KEY_CAL_VALID      "cal:valid"
+#define KEY_CAL_EXPO_MS    "cal:expoMs"
+#define KEY_CAL_GAIN       "cal:gain"   // driver units, 16 = 1x
+#define KEY_CAL_AWB_R      "cal:awbR"
+#define KEY_CAL_AWB_G      "cal:awbG"
+#define KEY_CAL_AWB_B      "cal:awbB"
 #define KEY_UPLOAD_MODE     "upload:mode"
 #define KEY_UPLOAD_COUNT    "upload:count"
 #define KEY_UPLOAD_INTERVAL_V "upload:iValue"
@@ -209,6 +217,20 @@ typedef struct capAttr {
     char intervalAnchorTime[MAX_LEN_8]; // "HH:MM", used for interval mode
     uint32_t camWarmupMs; // camera warm-up delay in milliseconds
 } capAttr_t;
+
+/**
+ * AE/AWB boot-seed calibration structure.
+ * Exposure is stored in ms (resolution-independent); gain/AWB are ratios.
+ * expoMs==0 means "AWB-only seed" (AE not learned, e.g. user manual exposure).
+ */
+typedef struct calSeed {
+    uint8_t valid;      // 1 = seed exists
+    uint32_t expoMs;    // converged exposure in milliseconds
+    uint16_t gain;      // converged AGC gain, driver units (16 = 1x)
+    uint16_t awbR;      // AWB red gain (0x3400/01 raw)
+    uint16_t awbG;      // AWB green gain (0x3402/03 raw)
+    uint16_t awbB;      // AWB blue gain (0x3404/05 raw)
+} calSeed_t;
 
 /**
  * Data upload management attributes structure
@@ -342,6 +364,9 @@ esp_err_t cfg_get_light_attr(lightAttr_t *light);
 esp_err_t cfg_set_light_attr(lightAttr_t *light);
 esp_err_t cfg_get_cap_attr(capAttr_t *capture);
 esp_err_t cfg_set_cap_attr(capAttr_t *capture);
+esp_err_t cfg_get_cal_seed(calSeed_t *seed);
+esp_err_t cfg_set_cal_seed(calSeed_t *seed);
+esp_err_t cfg_clear_cal_seed(void);
 esp_err_t cfg_get_upload_attr(uploadAttr_t *upload);
 esp_err_t cfg_set_upload_attr(uploadAttr_t *upload);
 esp_err_t cfg_get_mqtt_attr(mqttAttr_t *mqtt);
